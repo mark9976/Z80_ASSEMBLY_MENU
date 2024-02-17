@@ -1,0 +1,297 @@
+; Z80 Assembly
+; This program will display a menu and the give the user a prompt.
+; This version of the code will include features for backspace and 
+; backspace beyond SOL
+; The user will be presented with a signon and then given a prompt. 
+; When the M key is pushed 
+; The system will echo that to the screen and then display the Menu.  
+; The menu will be command driven not Character driven.
+
+; This program is designed to run as a ROM for standalone useage on a Z80.
+
+; One of the goals of this exercise is to write a full program with 
+; all of the features as complete as possible (for my current skill level).
+
+
+; Program definitions and variables
+
+	
+; CPM FUNCTIONS
+CONSOL_IN	EQU	01H			; Console In 
+CONSOL_OUT	EQU	01H			; Console Out 
+CONSOL_STATUS	EQU	0H			; Console Statusfor reading a string
+
+; ASCII Key Control Commands
+BS		EQU	08H			; Backspace
+HT		EQU	09H			; Horzontal Tab
+LF		EQU	0AH			; Line Feed
+VT		EQU	0BH			; Vertical Tab
+FF		EQU	0CH			; Form Feed
+CR		EQU	0DH			; Carrage Return
+SP		EQU	20H			; Space 
+
+KEYBUF:		DS	20H			; Keyboard Buffer for collecting a command from the user
+
+
+		ORG	0F000H				; on Z80 hardware must be F000H
+
+	
+		DI
+		XOR	A
+		LD	I,A
+SETUP_STACK:
+		LD	SP,AHEAD-4		;SETUP A FAKE STACK
+		JP	MEMSZ1			;RETURNS WITH TOP OF RAM IN [HL]
+		DW	AHEAD			;A Return opcode will pick up this address
+AHEAD:	
+		LD	SP,HL			;[HL] CONTAINS TOP OF RAM - WORKAREA
+		PUSH	HL
+		POP	IX			
+
+START:
+		LD	HL,PRGSIGNON		; Load the signon text 
+		CALL	SPRINTF			; must call the first BDOS direct
+		LD	HL,USAGE
+		CALL	SPRINTF
+UPROMPT:		
+		LD	HL,PROMPT		; this will print the prompt and wait for user input
+		CALL	SPRINTF
+		CALL	GETCMD			; this will call the get command routine
+		CALL	FINDCMD
+		JR	UPROMPT
+		HALT
+PRNMENU:	
+		CALL	CLEARSCREEN2	
+		LD	HL,MENU
+		CALL	SPRINTF
+		JP	UPROMPT
+RUN_CMD:
+		LD	HL,RUNING
+		CALL	SPRINTF
+		JP	UPROMPT
+LOAD_CMD:
+		LD	HL,LOAD
+		CALL	SPRINTF
+		JP	UPROMPT
+
+EXIT_CMD:
+		CALL	TERM			; end the program
+
+;************************************************
+; Find the top of memory 
+;************************************************
+MEMSIZ:	
+		PUSH	BC			;SAVE [BC]
+MEMSZ1:	
+		LD	HL,0FFFFH		;START FROM THE TOP DOWN
+MEMSZ2:	
+		LD	A,(HL)
+		CPL 
+		LD	(HL),A
+		CP	(HL)
+		CPL 				;PUT BACK WHAT WAS THERE
+		LD	(HL),A
+		JP	Z,GOTTOP
+		DEC	H			;TRY 100H BYTES LOWER
+		JR	MEMSZ2			;KEEP LOOKING FOR RAM
+GOTTOP:	
+		POP	BC			;RESTORE [BC]
+		RET 
+		
+;************************************************
+; Takes DE as input and prints to the screen
+; 
+; ***********************************************
+SPRINTF:
+		LD	A,(HL)		
+		CP	'$'
+		JP	Z,ENDPRN
+		CALL	CPRINT
+		INC	HL	
+		JP	SPRINTF
+ENDPRN:	
+		RET
+;************************************************
+; IO BOARD WAIT FOR STATUS
+;************************************************
+IOWAIT:
+		IN	A,(CONSOL_STATUS)
+		AND	04H
+		JP	Z,IOWAIT
+		RET	
+;************************************************
+; IO BOARD WAIT FOR STATUS
+;************************************************
+CI_IN: 	
+		IN	A,(CONSOL_STATUS)	;NEED CONSTAT TO CLEAN UP SHIFT KEYS ETC
+		AND	02H
+		JR	Z,CI_IN
+		RET
+;************************************************
+; Takes A as input and the moves it to the stack
+; Move A to E for function.
+;************************************************
+CPRINT:
+		LD	D,A
+		CALL	IOWAIT
+		LD	A,D
+		OUT	(CONSOL_OUT),A	
+		RET
+;************************************************
+; Will get a CHAR from the user and ECHO it and 
+; then return it in A
+;************************************************
+GETCHR:
+		LD	D,A
+		CALL	CI_IN
+		LD	A,D
+		IN	A,(CONSOL_IN)
+		RET
+
+;************************************************
+; Get command and put it in the key buffer
+;************************************************
+GETCMD:
+		LD	HL,KEYBUF		; set HL to the start of KEYBUF
+		
+CHARLOOP:						
+		CALL	GETCHR			; get the character
+		CALL	CPRINT					 
+		CP	CR			; check to see if carrage return was pushed
+		JP	Z,ENDINP		; jump if CR
+		CP	BS			; get another char
+		JP	NZ,NOT_BSPACE
+		DEC	HL			; needs to be here so that we get proper testing of HL
+		LD	BC,KEYBUF		; move address to BC for testing
+		OR	A			; Clear the Carry flag
+		SBC	HL,BC			; Test if HL is = BC
+		JR 	C,NEWLINE		; if carry is set then we went to far back and need to reset
+		ADD	HL,BC			; restore HL so we can continue
+		PUSH	HL
+		LD	HL,CLEARCHAR		; clean up the screen so we don't confuse the user
+		CALL	SPRINTF				
+		POP     HL
+		JP	CHARLOOP	
+NOT_BSPACE:			
+		LD	(HL),A			; put character in buffer
+		INC	HL			; move pointer to next position in buffer
+		JR	CHARLOOP
+NEWLINE:		
+		LD	A,'>'			; The backspace was pushed and clears the prompt we need to replace it.
+		CALL	CPRINT
+		JP	GETCMD			; reset the pointer to the start of KEYBUFF and start over
+ENDINP:
+		LD	(HL),24H		; put $ char at end of string
+		RET
+
+;************************************************
+; Find Command
+;************************************************
+
+FINDCMD:
+                LD	HL,CMDTABLE		; start at beginning of table
+FC_100:
+                LD	A,(HL)			; are we at end of table?
+                OR	A
+		JR      Z,BAD_CMD		; we don’t recognize it
+                LD	BC,KEYBUF		; point to command to look up
+FC_200:
+                LD	A,(BC)			; get character of command
+                CP	(HL)			; does it match table entry?
+                JR	NZ,FC_300		; no
+                INC	HL			; next char in CMD_TABLE
+                INC	BC			; next char in CMD_BUFF
+                JR	FC_200
+FC_300:
+                OR      80h			; turn on high bit
+                CP      (HL)			; does it match with hi bit?
+                JR      NZ,FC_600		; no: skip to next entry in table
+		INC     BC			; point to what should be the delimiter
+                LD      A,(BC)			; get expected delimiter
+                CP	24H + 1			; is it a control character (ie: CR or maybe tab) or space?	
+                JR	NC,FC_600		; no: try next entry in CMD_TABLE
+  		INC	HL			; point to LSByte of routine address
+                LD	E,(HL)			; start building pointer
+                INC	HL			; point to MSByte of routine address
+                LD	D,(HL)			; finish building pointer
+                EX	DE,HL			; put pointer in HL
+                JP	(HL)			; jump to command routine
+FC_600:
+                LD	A,(HL)			; get character of name from table
+                INC	HL			; point at the next byte
+                RLCA				; put bit 7 in carry
+                JR	NC,FC_600		; haven’t found the 80h marker yet
+		INC	HL			; point at MSByte of routine address
+                INC	HL			; point at next table entry
+                JR	FC_100			; keep searching the table
+BAD_CMD:	
+		LD	HL,INVALID
+		CALL	SPRINTF
+		RET
+
+;************************************************
+; Send CR and LF 50x to the screen to clear
+;************************************************
+CLEARSCREEN:
+		LD      B, 24H           	; 24 lines
+CLEARLOOP:    		
+    		LD	HL,CRLF
+		CALL    SPRINTF			; Print character		
+    		DEC     B               	; Decrement character count
+    		JP      NZ, CLEARLOOP   	; Loop until all lines are cleared
+    		RET                     	; Return to CP/M
+
+;************************************************
+; Send a 1AH to port 01 
+;************************************************
+CLEARSCREEN2:
+		LD	A,1AH
+		CALL	CPRINT
+		RET
+;************************************************
+; Terminate program and return to CP/M3
+;************************************************
+TERM:
+		HALT
+		RET
+
+CMDTABLE:
+		DB "RU",'N'+80h			
+		DW RUN_CMD
+		DB "LOA",'D'+80h
+		DW LOAD_CMD
+		DB "EXI",'T'+80h
+		DW EXIT_CMD
+		DB "MEN",'U'+80h
+		DW PRNMENU
+		DB 0
+
+
+; Data and memory allocations
+PRGSIGNON: 	DB	CR,LF
+		DB	'MENU Test Mark Kaufmann 15-FEB-2024$'
+PROMPT:		DB	CR,LF
+		DB	'>$'
+USAGE:		DB	CR,LF
+		DB	'USAGE: Press the M on keyboard for the MENU$'
+MENU:		DB	CR,LF
+		DB	HT,HT,'  M      M      MMMMMM    M     M   M      M',CR,LF
+		DB	HT,HT,' M  M  M  M     M         M M   M   M      M',CR,LF
+		DB	HT,HT,' M   MM   M     MMMM      M  M  M   M      M',CR,LF
+		DB	HT,HT,' M        M     M         M   M M   M      M',CR,LF
+		DB	HT,HT,' M        M     MMMMMM    M    MM    MMMMMM ',CR,LF
+		DB	CR,LF
+		DB	HT,HT,'*********************************************',CR,LF		
+		DB	'RUN',HT,'- Runs a program',CR,LF
+		DB	'LOAD',HT,'- Loads a program',CR,LF
+		DB	'EXIT',HT,'- Exits the menu program$'
+CRLF:		DB	CR,LF,'$'
+LOAD:		DB	'Loading...$'
+RUNING:		DB	'Running...$'
+CLEARCHAR:	DB	SP,BS,'$'
+INVALID:	DB	CR,LF
+		DB	'Invalid Command$'
+
+
+		HALT
+		NOP 				; Needed for the compiler
